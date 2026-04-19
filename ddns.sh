@@ -5,34 +5,11 @@ GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[0;33m"
 NC="\033[0m"
-GREEN_ground="\033[42;37m"
-RED_ground="\033[41;37m"
 Info="${GREEN}[信息]${NC}"
 Error="${RED}[错误]${NC}"
 Tip="${YELLOW}[提示]${NC}"
 
-# --- 脚本欢迎界面 ---
-cop_info(){
-clear
-echo -e "${GREEN}#######################################################
-#      ${RED} DDNS 一键脚本 (Cloudflare API Token版) ${GREEN} #
-#               作者: ${YELLOW}LAOWANG           ${GREEN}#
-#             https://github.com/chinggirltube                  ${GREEN}#
-#  ${YELLOW}优化: 完美支持 Bearer Token, 修复 ZoneID 获取逻辑 ${GREEN} #
-#######################################################${NC}"
-echo -e "${Info}此版本已修复 Cloudflare 新版 API 鉴权问题。 "
-echo
-}
-
 # --- 环境检查 ---
-
-# 检查系统
-if ! grep -qiE "debian|ubuntu" /etc/os-release; then
-    echo -e "${Error}本脚本仅支持 Debian 或 Ubuntu 系统。"
-    exit 1
-fi
-
-# 检查root权限
 check_root(){
     if [[ $(whoami) != "root" ]]; then
         echo -e "${Error}请以root身份执行该脚本！"
@@ -40,33 +17,21 @@ check_root(){
     fi
 }
 
-# 检查并安装curl和jq
 check_curl() {
     if ! command -v curl &>/dev/null || ! command -v jq &>/dev/null; then
-        echo -e "${YELLOW}未检测到 curl 或 jq，正在安装...${NC}"
+        echo -e "${YELLOW}正在安装必要依赖 curl/jq...${NC}"
         apt-get update && apt-get install -y curl jq
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}安装 curl/jq 失败，请手动安装后重试。${NC}"
-            exit 1
-        fi
     fi
 }
 
 # --- 核心安装与文件生成 ---
-
-# 安装DDNS相关文件
 install_ddns(){
-    # 备份旧版本
-    if [ -d "/etc/DDNS" ]; then
-        echo -e "${Tip}检测到已存在的DDNS目录，将备份为 /etc/DDNS.bak_$(date +%s)"
-        mv /etc/DDNS "/etc/DDNS.bak_$(date +%s)" 2>/dev/null
-    fi
-
     mkdir -p /etc/DDNS
     cp "$0" /usr/bin/ddns && chmod +x /usr/bin/ddns
 
-    # 创建纯净的配置文件
-    cat <<'EOF' > /etc/DDNS/.config
+    # 只有当配置文件不存在时才创建默认配置
+    if [ ! -f "/etc/DDNS/.config" ]; then
+        cat <<'EOF' > /etc/DDNS/.config
 Domain="your_domain.com"
 Domainv6="your_domainv6.com" 
 Email=""
@@ -74,154 +39,112 @@ Api_key="your_api_token"
 Telegram_Bot_Token=""
 Telegram_Chat_ID=""
 EOF
-    chmod 600 /etc/DDNS/.config
+        chmod 600 /etc/DDNS/.config
+    fi
 
-    touch /etc/DDNS/.old_ipv4 && chmod 600 /etc/DDNS/.old_ipv4
-    touch /etc/DDNS/.old_ipv6 && chmod 600 /etc/DDNS/.old_ipv6
-
-    # ================================================================= #
-    # 生成执行脚本：核心逻辑已修改为 Bearer Token
-    # ================================================================= #
+    # 生成执行脚本 (始终覆盖更新)
     cat <<'EOF' > /etc/DDNS/DDNS
 #!/bin/bash
 WORK_DIR="/etc/DDNS"
 LOG_FILE="/var/log/ddns.log"
-declare -A ZONE_ID_CACHE
+source $WORK_DIR/.config
 
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-}
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"; }
 
-send_telegram_notification(){
-    local message="$1"
-    if [[ -n "$Telegram_Bot_Token" && -n "$Telegram_Chat_ID" ]]; then
-        curl -s --connect-timeout 10 -X POST "https://api.telegram.org/bot$Telegram_Bot_Token/sendMessage" \
-             -d chat_id="$Telegram_Chat_ID" -d text="$message" >> "$LOG_FILE" 2>&1
-    fi
-}
-
+# 获取根域名
 get_root_domain() {
     echo "$1" | awk -F. '{print $(NF-1)"."$NF}'
 }
 
+# 获取 Zone ID
 get_zone_id() {
-    local full_domain=$1
-    local root_domain
-    root_domain=$(get_root_domain "$full_domain")
-    if [[ -n "${ZONE_ID_CACHE[$root_domain]}" ]]; then
-        echo "${ZONE_ID_CACHE[$root_domain]}"
-        return
-    fi
-    # 修改点：使用 Authorization: Bearer
-    ZONE_ID_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$root_domain" \
+    local root_domain=$(get_root_domain "$1")
+    # 注意：新版API只需 Authorization: Bearer <TOKEN>
+    local response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$root_domain" \
          -H "Authorization: Bearer $Api_key" \
          -H "Content-Type: application/json")
-    zone_id_val=$(echo "$ZONE_ID_RESPONSE" | jq -r '.result[] | select(.name=="'"$root_domain"'") | .id' 2>/dev/null)
-    if [ -z "$zone_id_val" ]; then
-        log "错误: 无法获取 Zone ID for '$root_domain'。请检查 Token 权限。响应: $ZONE_ID_RESPONSE"
+    local zid=$(echo "$response" | jq -r '.result[0].id' 2>/dev/null)
+    if [[ -z "$zid" || "$zid" == "null" ]]; then
+        log "获取ZoneID失败! 域名: $root_domain。响应: $response"
         echo ""
     else
-        ZONE_ID_CACHE["$root_domain"]="$zone_id_val"
-        echo "$zone_id_val"
+        echo "$zid"
     fi
 }
 
-get_dns_record_id() {
-    local zone_id=$1
-    local record_type=$2
-    local domain_name=$3
-    # 修改点：使用 Authorization: Bearer
-    DNS_ID_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=$record_type&name=$domain_name" \
+# 获取 Record ID
+get_record_id() {
+    local zid=$1 type=$2 name=$3
+    local response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zid/dns_records?type=$type&name=$name" \
          -H "Authorization: Bearer $Api_key" \
          -H "Content-Type: application/json")
-    echo "$DNS_ID_RESPONSE" | jq -r '.result[0].id' 2>/dev/null
+    echo "$response" | jq -r '.result[0].id' 2>/dev/null
 }
 
-update_dns_record() {
-    local record_type=$1
-    local domain=$2
-    local public_ip=$3
-    local old_ip=$4
-    local old_ip_file=$5
-    if [[ "$public_ip" == "$old_ip" ]]; then return 0; fi
-    local zone_id
-    zone_id=$(get_zone_id "$domain")
-    if [ -z "$zone_id" ]; then return 1; fi
-    local dns_id
-    dns_id=$(get_dns_record_id "$zone_id" "$record_type" "$domain")
-    if [ -z "$dns_id" ]; then return 1; fi
-    # 修改点：使用 Authorization: Bearer
-    response=$(curl -s -w "%{http_code}" -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$dns_id" \
+# 更新记录
+update_record() {
+    local type=$1 domain=$2 ip=$3 old_ip=$4 file=$5
+    if [[ "$ip" == "$old_ip" ]]; then return 0; fi
+    
+    local zid=$(get_zone_id "$domain")
+    [ -z "$zid" ] && return 1
+    
+    local rid=$(get_record_id "$zid" "$type" "$domain")
+    if [[ -z "$rid" || "$rid" == "null" ]]; then
+        log "获取RecordID失败: $domain"
+        return 1
+    fi
+
+    local response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zid/dns_records/$rid" \
          -H "Authorization: Bearer $Api_key" \
          -H "Content-Type: application/json" \
-         --data "{\"type\":\"$record_type\",\"name\":\"$domain\",\"content\":\"$public_ip\",\"ttl\":60,\"proxied\":false}")
-    http_code=${response: -3}
-    body=${response::-3}
-    if [ "$http_code" -eq 200 ] && [[ "$body" == *"\"success\":true"* ]]; then
-        log "成功: $domain 更新为 $public_ip"
-        echo "$public_ip" > "$old_ip_file"
-        echo "$domain -> $public_ip"
-        return 0
+         --data "{\"type\":\"$type\",\"name\":\"$domain\",\"content\":\"$ip\",\"ttl\":60,\"proxied\":false}")
+    
+    if [[ "$response" == *"\"success\":true"* ]]; then
+        echo "$ip" > "$WORK_DIR/$file"
+        log "更新成功: $domain -> $ip"
+        echo "更新成功: $domain -> $ip"
     else
-        log "失败: $domain 更新失败。响应: $body"
-        return 1
+        log "更新失败: $domain。响应: $response"
     fi
 }
 
-log "====== DDNS 开始 ======"
-cd "$WORK_DIR" || exit 1
-source .config
+# 主执行逻辑
 ipv4=$(curl -s4 --max-time 10 https://api.ipify.org || curl -s4 --max-time 10 https://ip.sb)
 ipv6=$(curl -s6 --max-time 10 https://api6.ipify.org || curl -s6 --max-time 10 https://ip.sb)
-old_v4=$(cat .old_ipv4 2>/dev/null)
-old_v6=$(cat .old_ipv6 2>/dev/null)
-notif=""
+old_v4=$(cat $WORK_DIR/.old_ipv4 2>/dev/null)
+old_v6=$(cat $WORK_DIR/.old_ipv6 2>/dev/null)
+
 if [[ -n "$Domain" && "$Domain" != "your_domain.com" && -n "$ipv4" ]]; then
-    res=$(update_dns_record "A" "$Domain" "$ipv4" "$old_v4" ".old_ipv4")
-    [ $? -eq 0 ] && [ -n "$res" ] && notif+="$res "
+    update_record "A" "$Domain" "$ipv4" "$old_v4" ".old_ipv4"
 fi
 if [[ -n "$Domainv6" && "$Domainv6" != "your_domainv6.com" && -n "$ipv6" ]]; then
-    res=$(update_dns_record "AAAA" "$Domainv6" "$ipv6" "$old_v6" ".old_ipv6")
-    [ $? -eq 0 ] && [ -n "$res" ] && notif+="$res "
+    update_record "AAAA" "$Domainv6" "$ipv6" "$old_v6" ".old_ipv6"
 fi
-[ -n "$notif" ] && send_telegram_notification "DDNS成功: $notif"
-log "====== DDNS 结束 ======"
 EOF
     chmod 700 /etc/DDNS/DDNS
-    touch /var/log/ddns.log && chmod 644 /var/log/ddns.log
 }
 
-# --- 管理功能 ---
-
-set_cloudflare_api(){
-    echo -e "${Tip}API Token模式下无需填邮箱，回车即可。"
-    read -p "Cloudflare 邮箱: " email
-    read -p "Cloudflare API Token: " api_key
-    if [ -z "$api_key" ]; then
-        echo -e "${Error}Token不能为空！"
-        return 1
-    fi
-    sed -i "s/^Email=.*/Email=\"$email\"/" /etc/DDNS/.config
-    sed -i "s/^Api_key=.*/Api_key=\"$api_key\"/" /etc/DDNS/.config
-    # 重新生成子脚本以防配置未生效
-    install_ddns >/dev/null 2>&1
+# --- 设置功能 ---
+set_api(){
+    echo -e "${Tip}请输入 Cloudflare API Token (切勿填错，注意前后无空格):"
+    read -p "Token: " token
+    # 去除输入中可能的空格
+    token=$(echo $token | xargs)
+    if [ -z "$token" ]; then echo "Token 不能为空"; return 1; fi
+    sed -i "s|^Api_key=.*|Api_key=\"$token\"|" /etc/DDNS/.config
+    echo -e "${Info}API Token 已更新。"
 }
 
 set_domain(){
-    read -p "IPv4 域名 (v4.kanata.im): " domain_v4
-    read -p "IPv6 域名 (v6.kanata.im): " domain_v6
-    sed -i "s/^Domain=.*/Domain=\"$domain_v4\"/" /etc/DDNS/.config
-    sed -i "s/^Domainv6=.*/Domainv6=\"$domain_v6\"/" /etc/DDNS/.config
+    read -p "IPv4 域名 (如 v4.kanata.im): " v4
+    read -p "IPv6 域名 (如 v6.kanata.im): " v6
+    sed -i "s|^Domain=.*|Domain=\"$v4\"|" /etc/DDNS/.config
+    sed -i "s|^Domainv6=.*|Domainv6=\"$v6\"|" /etc/DDNS/.config
+    echo -e "${Info}域名设置已更新。"
 }
 
-set_telegram_settings(){
-    read -p "Telegram Bot Token: " token
-    read -p "Telegram Chat ID: " chat_id
-    sed -i "s/^Telegram_Bot_Token=.*/Telegram_Bot_Token=\"$token\"/" /etc/DDNS/.config
-    sed -i "s/^Telegram_Chat_ID=.*/Telegram_Chat_ID=\"$chat_id\"/" /etc/DDNS/.config
-}
-
-run_ddns(){
+run_service(){
     cat <<EOF > /etc/systemd/system/ddns.service
 [Unit]
 Description=DDNS Service
@@ -238,10 +161,10 @@ EOF
 
     cat <<EOF > /etc/systemd/system/ddns.timer
 [Unit]
-Description=DDNS Timer (5min)
+Description=DDNS Timer
 
 [Timer]
-OnBootSec=2min
+OnBootSec=1min
 OnUnitActiveSec=5min
 Unit=ddns.service
 
@@ -250,37 +173,35 @@ WantedBy=timers.target
 EOF
     systemctl daemon-reload
     systemctl enable --now ddns.timer
-    systemctl start ddns.service
-    echo -e "${Info}服务已启动！"
+    echo -e "${Info}定时任务已启动 (每5分钟执行一次)。"
 }
 
-go_ahead(){
-    echo -e "${Tip}选择：1.启动 | 3.改域名 | 4.改API Token | 7.看日志 | 9.立即运行 | 0.退出"
-    read -p "选项: " option
-    case "$option" in
-        1) run_ddns; main ;;
-        3) set_domain; main ;;
-        4) set_cloudflare_api; main ;;
-        7) tail -f /var/log/ddns.log ;;
-        9) /etc/DDNS/DDNS; main ;;
+# --- 菜单 ---
+main(){
+    check_root
+    check_curl
+    install_ddns
+    
+    clear
+    echo -e "${GREEN}Cloudflare DDNS 工具 (API Token 专用修复版)${NC}"
+    echo -e "------------------------------------------"
+    echo -e "1. 修改域名"
+    echo -e "2. 修改 API Token"
+    echo -e "3. 立即运行一次"
+    echo -e "4. 查看运行日志"
+    echo -e "5. 启动/重启定时任务"
+    echo -e "0. 退出"
+    echo -e "------------------------------------------"
+    read -p "请选择 [0-5]: " opt
+    case "$opt" in
+        1) set_domain; main ;;
+        2) set_api; main ;;
+        3) /etc/DDNS/DDNS; read -p "按回车继续..."; main ;;
+        4) tail -n 20 /var/log/ddns.log; read -p "按回车继续..."; main ;;
+        5) run_service; sleep 2; main ;;
         0) exit 0 ;;
         *) main ;;
     esac
 }
 
-main(){
-    if [[ -z "$IS_RECURSIVE" ]]; then cop_info; fi
-    if [ ! -f "/etc/DDNS/.config" ]; then
-        install_ddns
-        set_cloudflare_api
-        set_domain
-        set_telegram_settings
-        run_ddns
-    fi
-    export IS_RECURSIVE=true
-    go_ahead
-}
-
-check_root
-check_curl
 main
