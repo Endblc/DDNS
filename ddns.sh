@@ -15,12 +15,12 @@ Tip="${YELLOW}[提示]${NC}"
 cop_info(){
 clear
 echo -e "${GREEN}#######################################################
-#      ${RED} DDNS 一键脚本 ${GREEN}       #
+#      ${RED} DDNS 一键脚本 (API Token 修正版) ${GREEN}       #
 #               作者: ${YELLOW}LAOWANG           ${GREEN}#
 #             https://github.com/chinggirltube                  ${GREEN}#
-#  ${YELLOW}优化: 缓存ZoneID, 重构更新逻辑, 加固文件权限${GREEN} #
+#  ${YELLOW}优化: 支持新版 Bearer Token, 弃用老版 Global Key ${GREEN} #
 #######################################################${NC}"
-echo -e "${Info}此版本已修复所有已知BUG，感谢您的耐心。 "
+echo -e "${Info}此版本已修复所有已知BUG，已完美支持 Cloudflare 独立 API Token 验证。 "
 echo
 }
 
@@ -72,8 +72,8 @@ install_ddns(){
     cat <<'EOF' > /etc/DDNS/.config
 Domain="your_domain.com"
 Domainv6="your_domainv6.com" 
-Email="your_email@gmail.com"
-Api_key="your_api_key"
+Email=""
+Api_key="your_api_token"
 
 Telegram_Bot_Token=""
 Telegram_Chat_ID=""
@@ -134,14 +134,14 @@ get_zone_id() {
 
     log "通过API获取 Zone ID for $root_domain..."
     local zone_id_val
+    # 替换为新版 Bearer Token 验证方式
     ZONE_ID_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$root_domain" \
-         -H "X-Auth-Email: $Email" \
-         -H "X-Auth-Key: $Api_key" \
+         -H "Authorization: Bearer $Api_key" \
          -H "Content-Type: application/json")
     zone_id_val=$(echo "$ZONE_ID_RESPONSE" | jq -r '.result[] | select(.name=="'"$root_domain"'") | .id' 2>/dev/null)
 
-    if [ -z "$zone_id_val" ]; then
-        log "错误: 无法获取 Zone ID for '$root_domain'. 检查邮箱、API Key或根域名。API响应: $ZONE_ID_RESPONSE"
+    if[ -z "$zone_id_val" ]; then
+        log "错误: 无法获取 Zone ID for '$root_domain'. 检查API Token权限或根域名。API响应: $ZONE_ID_RESPONSE"
         send_telegram_notification "DDNS 错误: 无法获取 ${root_domain} 的 Cloudflare Zone ID。"
         echo ""
     else
@@ -157,14 +157,14 @@ get_dns_record_id() {
     local domain_name=$3
     
     log "尝试获取 DNS Record ID for $domain_name (Type $record_type)..."
+    # 替换为新版 Bearer Token 验证方式
     DNS_ID_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=$record_type&name=$domain_name" \
-         -H "X-Auth-Email: $Email" \
-         -H "X-Auth-Key: $Api_key" \
+         -H "Authorization: Bearer $Api_key" \
          -H "Content-Type: application/json")
     local dns_id_val
     dns_id_val=$(echo "$DNS_ID_RESPONSE" | jq -r '.result[0].id' 2>/dev/null)
 
-    if [ -z "$dns_id_val" ]; then
+    if[ -z "$dns_id_val" ]; then
         log "警告: 无法获取 '$domain_name' 的 $record_type 记录 ID. 请确保该记录已存在。API响应: $DNS_ID_RESPONSE"
         echo ""
     else
@@ -203,9 +203,9 @@ update_dns_record() {
     fi
 
     log "正在更新 $domain ($record_type) -> $public_ip..."
+    # 替换为新版 Bearer Token 验证方式
     response=$(curl -s -w "%{http_code}" -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$dns_id" \
-         -H "X-Auth-Email: $Email" \
-         -H "X-Auth-Key: $Api_key" \
+         -H "Authorization: Bearer $Api_key" \
          -H "Content-Type: application/json" \
          --data "{\"type\":\"$record_type\",\"name\":\"$domain\",\"content\":\"$public_ip\",\"ttl\":60,\"proxied\":false}")
     
@@ -344,7 +344,7 @@ go_ahead(){
   ${GREEN}1${NC}：启动 / 重启 DDNS
   ${GREEN}2${NC}：停止 DDNS
   ${GREEN}3${NC}：修改要解析的域名
-  ${GREEN}4${NC}：修改 Cloudflare API
+  ${GREEN}4${NC}：修改 Cloudflare API Token (新版)
   ${GREEN}5${NC}：配置 Telegram 通知
   ${GREEN}6${NC}：${RED}彻底卸载 DDNS${NC}
   ${GREEN}7${NC}：查看 DDNS 实时日志
@@ -363,7 +363,7 @@ go_ahead(){
         6) uninstall_ddns ;;
         7) echo -e "${Info}正在显示实时日志... 按 ${RED}Ctrl+C${NC} 退出。"; tail -f /var/log/ddns.log; main ;;
         8) test_telegram_notification; sleep 2; main ;;
-        9) echo -e "${Info}正在手动触发一次DDNS检查..."; systemctl start ddns.service; echo -e "${Info}已触发，请通过日志查看结果。"; sleep 2; main ;;
+        9) echo -e "${Info}正在手动触发一次DDNS检查..."; /etc/DDNS/DDNS; echo -e "${Info}已触发完毕，请通过选项 7 查看结果。"; sleep 2; main ;;
         *) echo -e "${Error}无效的输入！"; sleep 2; main ;;
     esac
 }
@@ -387,19 +387,22 @@ uninstall_ddns(){
 }
 
 set_cloudflare_api(){
-    echo -e "${Tip}开始配置 Cloudflare API..." && echo
-    read -p "请输入您的 Cloudflare 邮箱: " email
-    read -p "请输入您的 Cloudflare Global API Key: " api_key
+    echo -e "${Tip}开始配置 Cloudflare API Token..." && echo
+    read -p "Cloudflare 邮箱 (API Token无需邮箱，可直接回车留空): " email
+    read -p "请输入您的 API Token 令牌 (粘贴刚才新建的一长串字符): " api_key
     
-    if [ -z "$email" ] || [ -z "$api_key" ]; then
-        echo -e "${Error}邮箱和 API Key 不能为空！"
+    if [ -z "$api_key" ]; then
+        echo -e "${Error}API Token 不能为空！"
         return 1
     fi
     
     sed -i "s/^Email=.*/Email=\"$email\"/" /etc/DDNS/.config
     sed -i "s/^Api_key=.*/Api_key=\"$api_key\"/" /etc/DDNS/.config
     
-    echo -e "${Info}Cloudflare API 设置已更新！"
+    # 因为替换了配置，触发重新生成核心脚本
+    install_ddns >/dev/null 2>&1
+    
+    echo -e "${Info}Cloudflare API Token 设置已更新！"
 }
 
 set_domain(){
@@ -428,7 +431,7 @@ set_telegram_settings(){
 }
 
 run_ddns(){
-    if [ ! -f "/etc/systemd/system/ddns.service" ]; then
+    if[ ! -f "/etc/systemd/system/ddns.service" ]; then
         cat > /etc/systemd/system/ddns.service <<EOF
 [Unit]
 Description=Dynamic DNS Update Service (Cloudflare)
@@ -444,12 +447,10 @@ WantedBy=multi-user.target
 EOF
     fi
 
-    if [ ! -f "/etc/systemd/system/ddns.timer" ]; then
+    if[ ! -f "/etc/systemd/system/ddns.timer" ]; then
         cat > /etc/systemd/system/ddns.timer <<EOF
 [Unit]
-Description=Run DDNS job every 5 minutes
-
-[Timer]
+Description=Run DDNS job every 5 minutes[Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
 Unit=ddns.service
@@ -482,7 +483,7 @@ main(){
         cop_info
     fi
     
-    if [ ! -f "/etc/DDNS/.config" ] || [ ! -f "/usr/bin/ddns" ]; then
+    if[ ! -f "/etc/DDNS/.config" ] || [ ! -f "/usr/bin/ddns" ]; then
         echo -e "${Tip}首次运行，开始安装流程..."
         install_ddns
         set_cloudflare_api
@@ -490,7 +491,7 @@ main(){
         set_telegram_settings
         run_ddns
         echo
-        echo -e "${GREEN_ground} DDNS (最终修正版) 安装并配置成功！ ${NC}"
+        echo -e "${GREEN_ground} DDNS (API Token 修正版) 安装并配置成功！ ${NC}"
         echo -e "${Info}你可以随时再次运行此脚本或直接输入 ${GREEN}ddns${NC} 进行管理。"
         echo -e "${Info}重要：请通过选项 ${GREEN}7${NC} 查看日志以确认首次运行是否成功。"
         echo
