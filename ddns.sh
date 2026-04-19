@@ -140,7 +140,7 @@ get_zone_id() {
          -H "Content-Type: application/json")
     zone_id_val=$(echo "$ZONE_ID_RESPONSE" | jq -r '.result[] | select(.name=="'"$root_domain"'") | .id' 2>/dev/null)
 
-    if[ -z "$zone_id_val" ]; then
+    if [ -z "$zone_id_val" ]; then
         log "错误: 无法获取 Zone ID for '$root_domain'. 检查API Token权限或根域名。API响应: $ZONE_ID_RESPONSE"
         send_telegram_notification "DDNS 错误: 无法获取 ${root_domain} 的 Cloudflare Zone ID。"
         echo ""
@@ -189,14 +189,14 @@ update_dns_record() {
 
     local zone_id
     zone_id=$(get_zone_id "$domain")
-    if[ -z "$zone_id" ]; then
+    if [ -z "$zone_id" ]; then
         log "错误: 因无法获取Zone ID，跳过 $domain 的更新。"
         return 1
     fi
     
     local dns_id
     dns_id=$(get_dns_record_id "$zone_id" "$record_type" "$domain")
-    if[ -z "$dns_id" ]; then
+    if [ -z "$dns_id" ]; then
         log "错误: 因无法获取DNS Record ID，跳过 $domain 的更新。"
         send_telegram_notification "DDNS 错误: 更新 ${domain} ($record_type) 失败，无法获取 DNS Record ID。"
         return 1
@@ -212,7 +212,7 @@ update_dns_record() {
     http_code=${response: -3}
     body=${response::-3}
 
-    if[ "$http_code" -eq 200 ] && [[ "$body" == *"\"success\":true"* ]]; then
+    if [ "$http_code" -eq 200 ] && [[ "$body" == *"\"success\":true"* ]]; then
         log "成功: $domain 的 $record_type 记录已更新为 $public_ip"
         echo "$public_ip" > "$old_ip_file"
         echo "${domain} 的 ${record_type} 地址已更新为 ${public_ip}。旧IP为 ${old_ip}。"
@@ -257,7 +257,7 @@ fi
 # --- 读取旧的 IP 地址 ---
 Old_Public_IPv4=$(cat "$WORK_DIR/.old_ipv4" 2>/dev/null)
 Old_Public_IPv6=$(cat "$WORK_DIR/.old_ipv6" 2>/dev/null)
-log "旧IPv4:[$Old_Public_IPv4], 旧IPv6: [$Old_Public_IPv6]"
+log "旧IPv4: [$Old_Public_IPv4], 旧IPv6: [$Old_Public_IPv6]"
 
 # --- 依次处理IPv4和IPv6的更新 ---
 notification_message=""
@@ -431,7 +431,7 @@ set_telegram_settings(){
 }
 
 run_ddns(){
-    if[ ! -f "/etc/systemd/system/ddns.service" ]; then
+    if [ ! -f "/etc/systemd/system/ddns.service" ]; then
         cat > /etc/systemd/system/ddns.service <<EOF
 [Unit]
 Description=Dynamic DNS Update Service (Cloudflare)
@@ -485,7 +485,7 @@ main(){
         cop_info
     fi
     
-    if[ ! -f "/etc/DDNS/.config" ] || [ ! -f "/usr/bin/ddns" ]; then
+    if [ ! -f "/etc/DDNS/.config" ] ||[ ! -f "/usr/bin/ddns" ]; then
         echo -e "${Tip}首次运行，开始安装流程..."
         install_ddns
         set_cloudflare_api
